@@ -1,10 +1,12 @@
 use dotenvy::dotenv;
-use std::io::{Write, Read, Result};
+use std::io::{Write, Read};
 use serde_json;
-use serde_json::json;
+use reentryudp::domain_models::*;
+use std::net::UdpSocket;
 
 
-fn IsValidChecklistDir(path: &str) -> bool {
+
+fn is_valid_checklist_dir(path: &str) -> bool {
     // Does the path even exist?
     
     let path = std::path::Path::new(path);
@@ -26,6 +28,8 @@ fn IsValidChecklistDir(path: &str) -> bool {
 
 
 fn main() {
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+
     dotenv().ok();
     // Load environment variables from .env file
 
@@ -44,7 +48,7 @@ fn main() {
     }
 
     let checklists_dir = std::env::var("CHECKLISTS_DIR").expect("CHECKLISTS_DIR not set");
-    if !IsValidChecklistDir(&checklists_dir) {
+    if !is_valid_checklist_dir(&checklists_dir) {
         eprintln!("Invalid CHECKLISTS_DIR: {}", checklists_dir);
         // Delete the .env file if it exists
         if std::path::Path::new(".env").exists() {
@@ -98,9 +102,9 @@ fn main() {
         std::process::exit(1);
     }
 
-    let mut spacecraftSelected = -1;
+    let mut spacecraft_selected = -1;
     loop {
-        match spacecraftSelected {
+        match spacecraft_selected {
             -1 => {
                 println!("Select a spacecraft:");
                 println!("Q: Exit");
@@ -119,37 +123,37 @@ fn main() {
                 }
                 match input.parse::<i32>() {
                     Ok(num) if num >= 0 && num < 5 as i32 => {
-                        spacecraftSelected = num;
+                        spacecraft_selected = num;
                     }
                     _ => {
                         println!("Invalid selection. Please enter a number between 0 and {} or 'Q' to exit.", 5 - 1);
-                        spacecraftSelected = -1; // Reset selection
+                        spacecraft_selected = -1; // Reset selection
                     }
                 }
             }
             _ => {
-                let mut spacecraftChecklists = Vec::new();
+                let mut spacecraft_checklists = Vec::new();
                 for (name, json) in &checklists {
-                    let checklistSpacecraftId = json.get("Spacecraft").unwrap().to_string().parse::<i32>().unwrap_or(-1);
-                    if checklistSpacecraftId != spacecraftSelected {
+                    let checklist_spacecraft_id = json.get("Spacecraft").unwrap().to_string().parse::<i32>().unwrap_or(-1);
+                    if checklist_spacecraft_id != spacecraft_selected {
                         continue; // Skip this checklist if it doesn't match the selected spacecraft
                     }
-                    let checklistGroup = json.get("Group").unwrap().to_string();
-                    let checklistName = json.get("Name").unwrap().to_string();
+                    let checklist_group = json.get("Group").unwrap().to_string();
+                    let checklist_name = json.get("Name").unwrap().to_string();
 
-                    spacecraftChecklists.push((name.clone(), checklistGroup.to_string(), checklistName.to_string(), json.clone()));
+                    spacecraft_checklists.push((name.clone(), checklist_group.to_string(), checklist_name.to_string(), json.clone()));
                 }
                 
                 
-                if spacecraftChecklists.is_empty() {
+                if spacecraft_checklists.is_empty() {
                     println!("No checklists found for the selected spacecraft.");
-                    spacecraftSelected = -1; // Reset selection
+                    spacecraft_selected = -1; // Reset selection
                     continue;
                 }
                 println!("Select a checklist for the selected spacecraft:");
                 println!("Q: Exit");
-                for (i, (name, group, checklistName, _)) in spacecraftChecklists.iter().enumerate() {
-                    println!("{}. {} - {}", i + 1, group, checklistName);
+                for (i, (_, group, checklist_name, _)) in spacecraft_checklists.iter().enumerate() {
+                    println!("{}. {} - {}", i + 1, group, checklist_name);
                 }
                 let mut input = String::new();
                 std::io::stdin().read_line(&mut input).expect("Failed to read line");
@@ -158,14 +162,14 @@ fn main() {
                     break;
                 }
                 match input.parse::<usize>() {
-                    Ok(num) if num > 0 && num <= spacecraftChecklists.len() => {
-                        let selected_checklist = &spacecraftChecklists[num - 1];
+                    Ok(num) if num > 0 && num <= spacecraft_checklists.len() => {
+                        let selected_checklist = &spacecraft_checklists[num - 1];
                         let checklist_json = &selected_checklist.3;
 
                         for step in checklist_json.get("Steps").unwrap().as_array().unwrap() {
                             match step.get("Type") {
                                 Some(step_type_val) => {
-                                    let step_type = step_type_val.as_i64().unwrap_or(-1) as i32;
+                                    let step_type = step_type_val.as_i64().unwrap_or(-1) as u32;
                                     match step_type  {
                                         0 | 7 => {
                                             println!("{}", step.get("Text").unwrap().as_str().unwrap_or("").trim());
@@ -175,11 +179,49 @@ fn main() {
                                                 std::io::stdin().read_line(&mut dummy_input).expect("Failed to read line");
                                             }
                                         }
-                                        1|2 => {
+                                        1|2|3|5 => {
                                             println!("Performing action: {}", step.get("Description").unwrap().as_str().unwrap_or("").trim());
-                                            let setID: i32 = step.get("SetID").unwrap().as_i64().unwrap_or(-1) as i32;
-                                            let toPosID: i32 = step.get("ToPosID").unwrap().as_i64().unwrap_or(-1) as i32;
-                                            // TODO send command to the spacecraft
+                                            let set_id: u32 = step.get("SetID").unwrap().as_i64().unwrap_or(-1) as u32;
+                                            let to_pos_id: u32 = step.get("ToPosID").unwrap().as_i64().unwrap_or(-1) as u32;
+                                            
+                                            let messagetype:u32 = match step_type {
+
+                                                1 => MessageType::SetSwitch as u32,
+                                                2 => MessageType::SetCircuitBreaker as u32,
+                                                3 => MessageType::SetSelector as u32,
+                                                5 => MessageType::SetHandle as u32,
+                                                _ => {
+                                                    eprintln!("Unknown step type: {}", step_type);
+                                                    eprintln!("Step: {:?}", step);
+                                                    todo!("Handle unknown step type: {}", step_type);
+                                                }
+                                            };
+
+                                            let target_craft: u32 = match spacecraft_selected {
+                                                0 => 2, // Command Module
+                                                1 => 3, // Lunar Module
+                                                2 => 1, // Gemini
+                                                3 => 0, // Mercury
+                                                4 => 4, // Space Shuttle
+                                                5 => 5, // Vostok
+
+                                                _ => {
+                                                    todo!("Invalid spacecraft selected: {}", spacecraft_selected);
+                                                }
+                                            };
+
+                                            let data_packet = DataPacket {
+                                                TargetCraft: target_craft,
+                                                MessageType: messagetype,
+                                                ID: set_id,
+                                                ToPos: to_pos_id,
+                                            };
+
+                                            let serialized_packet = serde_json::to_string(&data_packet).unwrap();
+                                            socket.send_to(serialized_packet.as_bytes(), "127.0.0.1:8051").unwrap();
+                                            // println!("Sent data packet: {:?}", data_packet);
+                                            // Sleep to let the system process the command
+                                            std::thread::sleep(std::time::Duration::from_millis(100));
                                         }
                                         _ => {
                                             println!("{}", step);
@@ -195,7 +237,7 @@ fn main() {
                         }
                     }
                     _ => {
-                        println!("Invalid selection. Please enter a number between 1 and {} or 'Q' to exit.", spacecraftChecklists.len());
+                        println!("Invalid selection. Please enter a number between 1 and {} or 'Q' to exit.", spacecraft_checklists.len());
                     }
                 }
             }
